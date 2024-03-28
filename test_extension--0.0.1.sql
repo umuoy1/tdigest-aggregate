@@ -17,22 +17,22 @@ CREATE OR REPLACE FUNCTION tdigest_add(
   AS 'test_extension', 'tdigest_add' 
   LANGUAGE C IMMUTABLE;
 
-
 CREATE OR REPLACE FUNCTION tdigest_percentiles(internal) 
   RETURNS double precision 
   AS 'test_extension', 'tdigest_percentiles' 
-  LANGUAGE C IMMUTABLE;
-
-CREATE OR REPLACE FUNCTION tdigest_percentiles(bytea, double precision[]) 
-  RETURNS double precision[] 
-  AS 'test_extension', 'tdigest_percentiles_from_bytes' 
   LANGUAGE C IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION tdigest_serial(internal) 
   RETURNS bytea 
   AS 'test_extension', 'tdigest_serial' 
   LANGUAGE C IMMUTABLE;
-  
+
+
+CREATE OR REPLACE FUNCTION tdigest_agg_from_bytes(bytea, double precision[]) 
+  RETURNS double precision[] 
+  AS 'test_extension', 'tdigest_agg_from_bytes' 
+  LANGUAGE C IMMUTABLE;
+
 CREATE AGGREGATE tdigest_percentile(double precision, int, double precision) (
   SFUNC = tdigest_add,
   STYPE = internal,

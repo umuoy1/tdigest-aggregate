@@ -15,12 +15,12 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(tdigest_add);
 PG_FUNCTION_INFO_V1(tdigest_percentiles);
 PG_FUNCTION_INFO_V1(tdigest_serial);
-PG_FUNCTION_INFO_V1(tdigest_percentiles_from_bytes);
+PG_FUNCTION_INFO_V1(tdigest_agg_from_bytes);
 
 Datum tdigest_add(PG_FUNCTION_ARGS);
 Datum tdigest_percentiles(PG_FUNCTION_ARGS);
 Datum tdigest_serial(PG_FUNCTION_ARGS);
-Datum tdigest_percentiles_from_bytes(PG_FUNCTION_ARGS);
+Datum tdigest_agg_from_bytes(PG_FUNCTION_ARGS);
 
 typedef struct td_aggregate_state
 {
@@ -210,7 +210,7 @@ Datum tdigest_serial(PG_FUNCTION_ARGS)
   PG_RETURN_BYTEA_P(result);
 }
 
-Datum tdigest_percentiles_from_bytes(PG_FUNCTION_ARGS)
+Datum tdigest_agg_from_bytes(PG_FUNCTION_ARGS)
 {
   bytea *bytes = PG_GETARG_BYTEA_P(0);
   int size = VARSIZE(bytes) - VARHDRSZ;
@@ -243,4 +243,3 @@ Datum tdigest_percentiles_from_bytes(PG_FUNCTION_ARGS)
   pfree(values);
   PG_RETURN_DATUM(result);
 }
-
