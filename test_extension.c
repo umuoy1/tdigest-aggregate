@@ -13,19 +13,24 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tdigest_add);
+PG_FUNCTION_INFO_V1(tdigest_agg);
 PG_FUNCTION_INFO_V1(tdigest_percentiles);
 PG_FUNCTION_INFO_V1(tdigest_serial);
+PG_FUNCTION_INFO_V1(tdigest_from_bytes);
 PG_FUNCTION_INFO_V1(tdigest_agg_from_bytes);
 
 Datum tdigest_add(PG_FUNCTION_ARGS);
+Datum tdigest_agg(PG_FUNCTION_ARGS);
 Datum tdigest_percentiles(PG_FUNCTION_ARGS);
 Datum tdigest_serial(PG_FUNCTION_ARGS);
+Datum tdigest_from_bytes(PG_FUNCTION_ARGS);
 Datum tdigest_agg_from_bytes(PG_FUNCTION_ARGS);
 
 typedef struct td_aggregate_state
 {
   td_histogram_t *tdigest;
-  double precision;
+  double *percentiles;
+  int npercentiles;
 } td_aggregate_state;
 
 /*
@@ -124,6 +129,21 @@ array_to_double(FunctionCallInfo fcinfo, ArrayType *v, int *len)
   return result;
 }
 
+static td_aggregate_state *
+td_aggregate_state_alloc(int compression, int npercentiles)
+{
+  td_aggregate_state *state;
+  size_t len;
+
+  len = sizeof(td_aggregate_state) + npercentiles * sizeof(double);
+  state = palloc(len);
+  state->tdigest = td_new(compression);
+  state->percentiles = (double *)((char *)state + sizeof(td_aggregate_state));
+  state->npercentiles = npercentiles;
+
+  return state;
+}
+
 Datum tdigest_add(PG_FUNCTION_ARGS)
 {
   td_aggregate_state *state;
@@ -146,21 +166,100 @@ Datum tdigest_add(PG_FUNCTION_ARGS)
   if (PG_ARGISNULL(0))
   {
     int compression = PG_GETARG_INT32(2);
+    double *percentiles = NULL;
+    int npercentiles = 0;
+
     MemoryContext oldcontext = MemoryContextSwitchTo(aggcontext);
 
-    state = palloc(sizeof(td_aggregate_state));
-    state->tdigest = td_new(compression);
-
     if (PG_NARGS() >= 4)
-      state->precision = PG_GETARG_FLOAT8(3);
+    {
+      percentiles = (double *)palloc(sizeof(double));
+      percentiles[0] = PG_GETARG_FLOAT8(3);
+      npercentiles = 1;
+    }
+
+    state = td_aggregate_state_alloc(compression, npercentiles);
+
+    if (percentiles)
+    {
+      memcpy(state->percentiles, percentiles, npercentiles * sizeof(double));
+      pfree(percentiles);
+    }
+
     MemoryContextSwitchTo(oldcontext);
   }
   else
   {
     state = (td_histogram_t *)PG_GETARG_POINTER(0);
+
+    double *new_percentiles = palloc((state->npercentiles + 1) * sizeof(double));
+
+    state->percentiles = new_percentiles;
+
+    state->percentiles[state->npercentiles] = PG_GETARG_FLOAT8(3);
+    state->npercentiles++;
+  }
+  td_add(state->tdigest, PG_GETARG_FLOAT8(1), 1);
+  PG_RETURN_POINTER(state);
+}
+
+Datum tdigest_agg(PG_FUNCTION_ARGS)
+{
+  td_aggregate_state *state;
+
+  MemoryContext aggcontext;
+
+  if (!AggCheckCallContext(fcinfo, &aggcontext))
+    elog(ERROR, "tdigest_agg called in non-aggregate context");
+
+  if (PG_ARGISNULL(1))
+  {
+    if (PG_ARGISNULL(0))
+    {
+      PG_RETURN_NULL();
+    }
+
+    PG_RETURN_DATUM(PG_GETARG_DATUM(0));
   }
 
-  td_add(state->tdigest, PG_GETARG_FLOAT8(1), 1);
+  if (PG_ARGISNULL(0))
+  {
+    MemoryContext oldcontext = MemoryContextSwitchTo(aggcontext);
+
+    bytea *bytes = PG_GETARG_BYTEA_P(1);
+    int size = VARSIZE(bytes) - VARHDRSZ;
+    unsigned char *buffer = VARDATA(bytes);
+    td_histogram_t *td = td_from_bytes(buffer, size);
+    if (!td)
+    {
+      PG_RETURN_NULL();
+    }
+
+    double *percentiles;
+    int npercentiles;
+    percentiles = array_to_double(fcinfo, PG_GETARG_ARRAYTYPE_P(2), &npercentiles);
+    state = td_aggregate_state_alloc(td->compression, npercentiles);
+    if (percentiles)
+    {
+      memcpy(state->percentiles, percentiles, npercentiles * sizeof(double));
+      pfree(percentiles);
+    }
+    state->tdigest = td;
+    state->npercentiles = npercentiles;
+
+    MemoryContextSwitchTo(oldcontext);
+  }
+  else
+  {
+    bytea *bytes = PG_GETARG_BYTEA_P(1);
+    int size = VARSIZE(bytes) - VARHDRSZ;
+    unsigned char *buffer = VARDATA(bytes);
+    td_histogram_t *td = td_from_bytes(buffer, size);
+
+    state = (td_aggregate_state *)PG_GETARG_POINTER(0);
+    td_merge(state->tdigest, td);
+  }
+
   PG_RETURN_POINTER(state);
 }
 
@@ -177,9 +276,22 @@ Datum tdigest_percentiles(PG_FUNCTION_ARGS)
   }
 
   state = (td_aggregate_state *)PG_GETARG_POINTER(0);
-  double result = td_value_at(state->tdigest, state->precision);
-  td_free(state->tdigest);
-  PG_RETURN_FLOAT8(result);
+  double *result = palloc(state->npercentiles * sizeof(double));
+
+  int nvalues = state->npercentiles;
+  int nret = nvalues + 3;
+  int i;
+  for (i = 3; i < nvalues + 3; i++)
+  {
+    result[i] = td_value_at(state->tdigest, state->percentiles[i - 3]);
+  }
+  result[0] = td_min(state->tdigest);
+  result[1] = td_max(state->tdigest);
+  result[2] = td_avg(state->tdigest);
+
+  Datum ret = double_to_array(fcinfo, result, nret);
+  pfree(result);
+  PG_RETURN_DATUM(ret);
 }
 
 Datum tdigest_serial(PG_FUNCTION_ARGS)
@@ -210,7 +322,7 @@ Datum tdigest_serial(PG_FUNCTION_ARGS)
   PG_RETURN_BYTEA_P(result);
 }
 
-Datum tdigest_agg_from_bytes(PG_FUNCTION_ARGS)
+Datum tdigest_from_bytes(PG_FUNCTION_ARGS)
 {
   bytea *bytes = PG_GETARG_BYTEA_P(0);
   int size = VARSIZE(bytes) - VARHDRSZ;
@@ -228,17 +340,17 @@ Datum tdigest_agg_from_bytes(PG_FUNCTION_ARGS)
     PG_RETURN_NULL();
   }
 
-  int retn = nvalues + 3;
-  double *results = palloc(retn * sizeof(double));
+  int nret = nvalues + 3;
+  double *results = palloc(nret * sizeof(double));
   results[0] = td_min(td);
   results[1] = td_max(td);
   results[2] = td_avg(td);
-  for (int i = 3; i < retn; i++)
+  for (int i = 3; i < nvalues + 3; i++)
   {
     results[i] = td_value_at(td, values[i - 3]);
   }
   td_free(td);
-  Datum result = double_to_array(fcinfo, results, retn);
+  Datum result = double_to_array(fcinfo, results, nret);
   pfree(results);
   pfree(values);
   PG_RETURN_DATUM(result);
