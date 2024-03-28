@@ -1,8 +1,3 @@
-#include <stdlib.h>
-#include <stdbool.h>
-#include <string.h>
-#include <math.h>
-
 #include "tdigest.h"
 
 #include "postgres.h"
@@ -11,9 +6,9 @@
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 #include "funcapi.h"
-
 #include "utils/array.h"
 #include "utils/lsyscache.h"
+#include "tdigest.c"
 
 PG_MODULE_MAGIC;
 
@@ -248,3 +243,4 @@ Datum tdigest_percentiles_from_bytes(PG_FUNCTION_ARGS)
   pfree(values);
   PG_RETURN_DATUM(result);
 }
+
